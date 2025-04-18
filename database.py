@@ -1,5 +1,53 @@
 import mysql.connector
 
+def get_data(table_name=None, columns="*", where="", query=None):
+    """Fungsi yang lebih fleksibel untuk query"""
+    conn = create_connection()
+    if conn is None:
+        return []
+    
+    cursor = conn.cursor(dictionary=True)
+    
+    try:
+        if query:
+            cursor.execute(query)
+        else:
+            sql = f"SELECT {columns} FROM {table_name}"
+            if where:
+                sql += f" WHERE {where}"
+            cursor.execute(sql)
+        
+        return cursor.fetchall()
+    except Exception as e:
+        print(f"Database error: {str(e)}")
+        return []
+    finally:
+        cursor.close()
+        conn.close()
+def bulk_insert(table_name, data_list):
+    """Insert banyak data sekaligus"""
+    if not data_list:
+        return False
+    
+    conn = create_connection()
+    if conn is None:
+        return False
+    
+    cursor = conn.cursor()
+    columns = ", ".join(data_list[0].keys())
+    placeholders = ", ".join(["%s"] * len(data_list[0]))
+    query = f"INSERT INTO {table_name} ({columns}) VALUES ({placeholders})"
+    
+    try:
+        cursor.executemany(query, [tuple(data.values()) for data in data_list])
+        conn.commit()
+        return True
+    except mysql.connector.Error as err:
+        print(f"Error bulk insert: {err}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
 def create_connection():
     """Membuat koneksi ke database MySQL"""
     try:
@@ -93,6 +141,7 @@ def init_database():
         """
     ]
     
+    
     try:
         for table in tables:
             cursor.execute(table)
@@ -104,3 +153,4 @@ def init_database():
     finally:
         cursor.close()
         conn.close()
+        

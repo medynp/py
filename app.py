@@ -2,8 +2,11 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from database import create_connection, init_database
+from database import create_connection, init_database, bulk_insert, get_data
 from ahp_calculations import calculate_ahp, check_consistency
+from utils.template_utils import download_guru_template, download_nilai_template
+from utils.import_utils import import_guru_data, import_nilai_data
+
 
 # Inisialisasi database
 init_database()
@@ -169,38 +172,55 @@ def show_dashboard():
 def show_guru_management():
     st.header("Manajemen Data Guru")
     
-    tab1, tab2 = st.tabs(["Daftar Guru", "Tambah Guru"])
+    tab1, tab2, tab3 = st.tabs(["Daftar Guru", "Tambah Manual", "Import Excel"])
     
-    with tab1:
-        st.subheader("Daftar Guru")
-        guru_list = get_data("guru")
-        if guru_list:
-            df = pd.DataFrame(guru_list)
-            st.dataframe(df)
-        else:
-            st.warning("Belum ada data guru")
-    
-    with tab2:
-        st.subheader("Tambah Guru Baru")
-        with st.form("form_tambah_guru"):
-            nama = st.text_input("Nama Guru")
-            nip = st.text_input("NIP")
-            jabatan = st.text_input("Jabatan")
-            tgl_masuk = st.date_input("Tanggal Masuk")
-            
-            submitted = st.form_submit_button("Simpan")
-            if submitted:
-                if nama and nip:
-                    data = {
-                        'nama_guru': nama,
-                        'nip': nip,
-                        'jabatan': jabatan,
-                        'tanggal_masuk': tgl_masuk
-                    }
-                    save_data("guru", data)
-                    st.success("Data guru berhasil disimpan")
-                else:
-                    st.error("Nama dan NIP wajib diisi")
+    with tab3:
+        st.subheader("Import Data Guru")
+        
+        # 1. Download Template Section
+        st.markdown("### Download Template")
+        if st.button("Generate Template"):
+            try:
+                subkriteria_list = get_data("subkriteria")
+                template_path = download_guru_template(subkriteria_list)
+                
+                with open(template_path, "rb") as f:
+                    st.download_button(
+                        label="Download Template Excel",
+                        data=f,
+                        file_name="template_import_guru.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+            except Exception as e:
+                st.error(str(e))
+        
+        # 2. Upload Section
+        st.markdown("### Upload File Excel")
+        uploaded_file = st.file_uploader(
+            "Pilih file Excel (.xlsx)",
+            type=["xlsx"],
+            key="guru_upload"
+        )
+        
+        if uploaded_file:
+            try:
+                # Proses import data
+                data_list = import_guru_data(uploaded_file)
+                
+                # Tampilkan preview
+                st.success("File berhasil dibaca")
+                st.dataframe(pd.DataFrame(data_list).head())
+                
+                # Konfirmasi simpan
+                if st.button("Simpan ke Database"):
+                    if bulk_insert("guru", data_list):
+                        st.success(f"Berhasil menyimpan {len(data_list)} data guru")
+                        st.session_state.refresh = True
+                    else:
+                        st.error("Gagal menyimpan ke database")
+                        
+            except Exception as e:
+                st.error(str(e))
 
 def show_kriteria_management():
     st.header("Manajemen Kriteria & Subkriteria")
@@ -471,86 +491,213 @@ def show_perbandingan():
                         st.write(check_consistency(cr))
 
 def show_penilaian():
-    st.header("Penilaian Guru Berdasarkan Subkriteria")
+    st.header("Penilaian Guru")
     
-    guru_list = get_data("guru")
-    if not guru_list:
-        st.warning("Belum ada data guru. Silakan tambah guru terlebih dahulu.")
-        return
+    tab1, tab2, tab3 = st.tabs([
+        "Input Manual", 
+        "Import Nilai", 
+        "History Penilaian"
+    ])
     
-    selected_guru = st.selectbox(
-        "Pilih Guru",
-        guru_list,
-        format_func=lambda x: f"{x['nama_guru']} ({x['nip']})",
-        key="select_guru_penilaian"
-    )
-    
-    kriteria_list = get_data("kriteria")
-    if not kriteria_list:
-        st.warning("Belum ada kriteria yang ditentukan")
-        return
-    
-    with st.form(key="form_penilaian_guru"):
-        nilai_subkriteria = {}
+    with tab1:
+        # Kode input manual yang sudah ada
+        guru_list = get_data("guru")
+        if not guru_list:
+            st.warning("Belum ada data guru. Silakan tambah guru terlebih dahulu.")
+            return
         
-        for kriteria in kriteria_list:
-            st.subheader(f"Kriteria: {kriteria['nama_kriteria']}")
+        selected_guru = st.selectbox(
+            "Pilih Guru",
+            guru_list,
+            format_func=lambda x: f"{x['nama_guru']} ({x['nip']})",
+            key="select_guru_penilaian"
+        )
+        
+        kriteria_list = get_data("kriteria")
+        if not kriteria_list:
+            st.warning("Belum ada kriteria yang ditentukan")
+            return
+        
+        with st.form(key="form_penilaian_guru"):
+            nilai_subkriteria = {}
             
-            subkriteria_list = get_data(
-                "subkriteria", 
-                where=f"id_kriteria={kriteria['id_kriteria']}"
+            for kriteria in kriteria_list:
+                st.subheader(f"Kriteria: {kriteria['nama_kriteria']}")
+                
+                subkriteria_list = get_data(
+                    "subkriteria", 
+                    where=f"id_kriteria={kriteria['id_kriteria']}"
+                )
+                
+                if not subkriteria_list:
+                    st.warning(f"Belum ada subkriteria untuk {kriteria['nama_kriteria']}")
+                    continue
+                
+                for sub in subkriteria_list:
+                    existing_nilai = get_data(
+                        "nilai_subkriteria",
+                        where=f"id_guru={selected_guru['id_guru']} AND id_subkriteria={sub['id_subkriteria']}"
+                    )
+                    
+                    default_value = 3
+                    if existing_nilai:
+                        default_value = int(existing_nilai[0]['nilai'])
+                    
+                    nilai = st.number_input(
+                        f"Nilai untuk {sub['nama_subkriteria']} (1-5)",
+                        min_value=1,
+                        max_value=5,
+                        value=default_value,
+                        step=1,
+                        key=f"nilai_{sub['id_subkriteria']}"
+                    )
+                    nilai_subkriteria[sub['id_subkriteria']] = int(nilai)
+            
+            submitted = st.form_submit_button("Simpan Penilaian")
+            if submitted:
+                for sub_id, nilai in nilai_subkriteria.items():
+                    existing = get_data(
+                        "nilai_subkriteria",
+                        where=f"id_guru={selected_guru['id_guru']} AND id_subkriteria={sub_id}"
+                    )
+                    
+                    if existing:
+                        update_data(
+                            "nilai_subkriteria",
+                            {'nilai': nilai, 'tanggal_penilaian': datetime.now().date()},
+                            f"id_nilai={existing[0]['id_nilai']}"
+                        )
+                    else:
+                        data = {
+                            'id_guru': selected_guru['id_guru'],
+                            'id_subkriteria': sub_id,
+                            'nilai': nilai,
+                            'tanggal_penilaian': datetime.now().date()
+                        }
+                        save_data("nilai_subkriteria", data)
+                
+                st.success("Penilaian berhasil disimpan")
+                st.experimental_rerun()
+    with tab2:
+        st.subheader("Import Nilai dari Excel")
+        
+        # Dapatkan data referensi
+        guru_list = get_data("guru")
+        subkriteria_list = get_data("subkriteria")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Download Template
+            if st.button("Download Template Excel"):
+                if not guru_list or not subkriteria_list:
+                    st.warning("Data guru atau subkriteria belum lengkap")
+                else:
+                    try:
+                        template_path = download_nilai_template(guru_list, subkriteria_list)
+                        with open(template_path, "rb") as f:
+                            st.download_button(
+                                label="Klik untuk Download",
+                                data=f,
+                                file_name="template_nilai_guru.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+        
+        with col2:
+            # Upload File
+            uploaded_file = st.file_uploader(
+                "Pilih file Excel",
+                type=["xlsx"],
+                key="nilai_upload"
             )
             
-            if not subkriteria_list:
-                st.warning(f"Belum ada subkriteria untuk {kriteria['nama_kriteria']}")
-                continue
-            
-            for sub in subkriteria_list:
-                existing_nilai = get_data(
-                    "nilai_subkriteria",
-                    where=f"id_guru={selected_guru['id_guru']} AND id_subkriteria={sub['id_subkriteria']}"
-                )
+            if uploaded_file:
+                try:
+                    # Proses import file
+                    df = pd.read_excel(uploaded_file, sheet_name="Data_Nilai", engine='openpyxl')
+                    
+                    # Validasi
+                    if 'NIP' not in df.columns:
+                        raise ValueError("Kolom 'NIP' tidak ditemukan")
+                    
+                    st.success("File berhasil dibaca")
+                    st.dataframe(df.head(3))
+                    
+                    if st.button("Proses Import"):
+                        with st.spinner("Memproses data..."):
+                            # Konversi ke format database
+                            data_nilai = []
+                            subkriteria_map = {sub['nama_subkriteria']: sub['id_subkriteria'] for sub in subkriteria_list}
+                            
+                            for _, row in df.iterrows():
+                                nip = str(row['NIP'])
+                                guru = next((g for g in guru_list if g['nip'] == nip), None)
+                                
+                                if not guru:
+                                    continue
+                                
+                                for sub in subkriteria_list:
+                                    if sub['nama_subkriteria'] in df.columns:
+                                        nilai = row[sub['nama_subkriteria']]
+                                        if pd.notna(nilai) and 1 <= nilai <= 5:
+                                            data_nilai.append({
+                                                'id_guru': guru['id_guru'],
+                                                'id_subkriteria': sub['id_subkriteria'],
+                                                'nilai': int(nilai),
+                                                'tanggal_penilaian': pd.to_datetime(row['Tanggal Penilaian']).date() if 'Tanggal Penilaian' in df.columns else datetime.now().date()
+                                            })
+                            
+                            # Simpan ke database
+                            if bulk_insert("nilai_subkriteria", data_nilai):
+                                st.success(f"Berhasil mengimport {len(data_nilai)} data nilai")
+                                st.session_state.refresh = True
+                            else:
+                                st.error("Gagal menyimpan ke database")
                 
-                default_value = 3
-                if existing_nilai:
-                    default_value = int(existing_nilai[0]['nilai'])
-                
-                nilai = st.number_input(
-                    f"Nilai untuk {sub['nama_subkriteria']} (1-5)",
-                    min_value=1,
-                    max_value=5,
-                    value=default_value,
-                    step=1,
-                    key=f"nilai_{sub['id_subkriteria']}"
-                )
-                nilai_subkriteria[sub['id_subkriteria']] = int(nilai)
+                except Exception as e:
+                    st.error(f"Error memproses file: {str(e)}")
+    
+    with tab3:
+        st.subheader("History Penilaian")
         
-        submitted = st.form_submit_button("Simpan Penilaian")
-        if submitted:
-            for sub_id, nilai in nilai_subkriteria.items():
-                existing = get_data(
-                    "nilai_subkriteria",
-                    where=f"id_guru={selected_guru['id_guru']} AND id_subkriteria={sub_id}"
-                )
-                
-                if existing:
-                    update_data(
-                        "nilai_subkriteria",
-                        {'nilai': nilai, 'tanggal_penilaian': datetime.now().date()},
-                        f"id_nilai={existing[0]['id_nilai']}"
-                    )
-                else:
-                    data = {
-                        'id_guru': selected_guru['id_guru'],
-                        'id_subkriteria': sub_id,
-                        'nilai': nilai,
-                        'tanggal_penilaian': datetime.now().date()
-                    }
-                    save_data("nilai_subkriteria", data)
+        # Pilih guru untuk melihat history
+        guru_list = get_data("guru")
+        selected_guru = st.selectbox(
+            "Pilih Guru",
+            guru_list,
+            format_func=lambda x: f"{x['nama_guru']} ({x['nip']})",
+            key="select_guru_history"
+        )
+        
+        if selected_guru:
+            # Dapatkan history penilaian
+            query = f"""
+            SELECT s.nama_subkriteria, n.nilai, n.tanggal_penilaian 
+            FROM nilai_subkriteria n
+            JOIN subkriteria s ON n.id_subkriteria = s.id_subkriteria
+            WHERE n.id_guru = {selected_guru['id_guru']}
+            ORDER BY n.tanggal_penilaian DESC
+            """
+            history = get_data(query=query)
             
-            st.success("Penilaian berhasil disimpan")
-            st.experimental_rerun()
-
+            if history:
+                # Tampilkan dalam bentuk tabel
+                df = pd.DataFrame(history)
+                st.dataframe(df)
+                
+                # Tampilkan grafik trend nilai
+                st.subheader("Perkembangan Nilai")
+                pivot_df = df.pivot_table(
+                    index='tanggal_penilaian',
+                    columns='nama_subkriteria',
+                    values='nilai',
+                    aggfunc='mean'
+                )
+                st.line_chart(pivot_df)
+            else:
+                st.info("Belum ada data penilaian untuk guru ini")
 def show_hasil_perangkingan():
     st.header("Hasil Perangkingan Guru")
     
@@ -608,7 +755,48 @@ def show_hasil_perangkingan():
             kriteria = next((k for k in get_data("kriteria") if k['id_kriteria'] == id_kriteria), None)
             if kriteria:
                 st.write(f"- {kriteria['nama_kriteria']}: CR = {cr:.4f} ({check_consistency(cr)})")
-
+def download_template():
+    """Membuat template file Excel untuk import data"""
+    # Buat template untuk import guru
+    guru_template = pd.DataFrame(columns=[
+        'nama_guru', 
+        'nip', 
+        'jabatan', 
+        'tanggal_masuk'
+    ])
+    
+    # Isi dengan contoh data
+    guru_template.loc[0] = {
+        'nama_guru': 'Nama Guru Contoh',
+        'nip': '1234567890',
+        'jabatan': 'Guru Mata Pelajaran',
+        'tanggal_masuk': '2023-01-01'
+    }
+    
+    # Buat template untuk import nilai
+    subkriteria_list = get_data("subkriteria")
+    nilai_columns = ['nip', 'tanggal_penilaian'] + [sub['nama_subkriteria'] for sub in subkriteria_list]
+    nilai_template = pd.DataFrame(columns=nilai_columns)
+    
+    # Isi dengan contoh data
+    if len(nilai_columns) > 2:  # Pastikan ada subkriteria
+        contoh_nilai = {
+            'nip': '1234567890',
+            'tanggal_penilaian': datetime.now().date().strftime("%Y-%m-%d")
+        }
+        # Isi nilai untuk 3 subkriteria pertama sebagai contoh
+        for sub in subkriteria_list[:3]:
+            contoh_nilai[sub['nama_subkriteria']] = 3
+            
+        nilai_template.loc[0] = contoh_nilai
+    
+    # Simpan ke Excel dengan 2 sheet
+    template_path = 'template_import_guru.xlsx'
+    with pd.ExcelWriter(template_path) as writer:
+        guru_template.to_excel(writer, sheet_name='Data_Guru', index=False)
+        nilai_template.to_excel(writer, sheet_name='Data_Nilai', index=False)
+    
+    return template_path
 # Main Application
 def main():
     st.title("Sistem AHP untuk Penilaian Kenaikan Status Guru")
