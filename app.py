@@ -6,6 +6,7 @@ from database import create_connection, init_database, bulk_insert, get_data
 from ahp_calculations import calculate_ahp, check_consistency
 from utils.template_utils import download_guru_template, download_nilai_template
 from utils.import_utils import import_guru_data, import_nilai_data
+from utils.stats_utils import calculate_spearman_rank
 
 
 # Inisialisasi database
@@ -797,6 +798,188 @@ def download_template():
         nilai_template.to_excel(writer, sheet_name='Data_Nilai', index=False)
     
     return template_path
+
+def show_spearman_analysis():
+    st.subheader("Korelasi Rank Spearman")
+    st.markdown("""
+    **Analisis hubungan antara berbagai kriteria penilaian menggunakan metode rank Spearman.**
+    """)
+    
+    with st.expander("📌 Petunjuk Analisis", expanded=True):
+        st.markdown("""
+        1. Pilih rentang waktu yang ingin dianalisis
+        2. Pilih apakah ingin menganalisis per guru atau semua guru
+        3. Klik tombol "Hitung Korelasi"
+        4. Interpretasikan hasil:
+           - Nilai mendekati +1: Korelasi positif kuat
+           - Nilai mendekati -1: Korelasi negatif kuat
+           - Nilai sekitar 0: Tidak ada korelasi
+           - P-value < 0.05: Korelasi signifikan
+        """)
+    
+    # Filter Data
+    col1, col2 = st.columns(2)
+    with col1:
+        date_range = st.date_input(
+            "Rentang Waktu",
+            value=[datetime.now().replace(month=1, day=1), datetime.now()],
+            max_value=datetime.now(),
+            key="spearman_date_range"
+        )
+    
+    with col2:
+        analysis_scope = st.radio(
+            "Lingkup Analisis",
+            ["Semua Guru", "Per Guru"],
+            horizontal=True,
+            key="spearman_scope"
+        )
+        
+        if analysis_scope == "Per Guru":
+            guru_list = get_data("guru")
+            selected_guru = st.selectbox(
+                "Pilih Guru",
+                guru_list,
+                format_func=lambda x: f"{x['nama_guru']} ({x['nip']})",
+                key="spearman_guru_select"
+            )
+            guru_id = selected_guru['id_guru']
+        else:
+            guru_id = None
+    
+    # Tombol Analisis
+    if st.button("🔄 Hitung Korelasi", type="primary", key="calculate_spearman"):
+        with st.spinner("Menghitung korelasi Spearman..."):
+            start_date = date_range[0]
+            end_date = date_range[1] if len(date_range) > 1 else datetime.now().date()
+            
+            corr_matrix, p_matrix, plot_path = calculate_spearman_rank(
+                guru_id=guru_id,
+                start_date=start_date,
+                end_date=end_date
+            )
+            
+            if corr_matrix is not None:
+                display_spearman_results(corr_matrix, p_matrix, plot_path)
+            else:
+                st.warning("Tidak ada data penilaian pada periode yang dipilih")
+
+def display_spearman_results(corr_matrix, p_matrix, plot_path):
+    """Menampilkan hasil perhitungan Spearman"""
+    st.success("Analisis korelasi selesai!")
+    
+    # Dapatkan nama subkriteria
+    subkriteria = get_data("subkriteria")
+    subkriteria_names = [s['nama_subkriteria'] for s in subkriteria]
+    
+    # Tab untuk berbagai tampilan
+    tab1, tab2, tab3 = st.tabs(["Visualisasi", "Matriks Korelasi", "Signifikansi"])
+    
+    with tab1:
+        st.subheader("Heatmap Korelasi")
+        st.image(plot_path, use_column_width=True)
+        st.markdown("**Legenda:**")
+        st.markdown("""
+        - 🔴 Korelasi negatif kuat (-1.0 sampai -0.7)
+        - 🟠 Korelasi negatif sedang (-0.7 sampai -0.3)
+        - ⚪ Korelasi lemah (-0.3 sampai +0.3)
+        - 🟢 Korelasi positif sedang (+0.3 sampai +0.7)
+        - 🔵 Korelasi positif kuat (+0.7 sampai +1.0)
+        """)
+    
+    with tab2:
+        st.subheader("Matriks Korelasi Spearman")
+        corr_df = pd.DataFrame(
+            corr_matrix,
+            index=subkriteria_names,
+            columns=subkriteria_names
+        )
+        
+        # Style untuk highlight
+        def color_spearman(val):
+            color = None
+            if val >= 0.7:
+                color = "background-color: #1f77b4; color: white"  # Biru tua
+            elif val >= 0.3:
+                color = "background-color: #aec7e8"  # Biru muda
+            elif val <= -0.7:
+                color = "background-color: #d62728; color: white"  # Merah tua
+            elif val <= -0.3:
+                color = "background-color: #ff9896"  # Merah muda
+            return color
+        
+        st.dataframe(
+            corr_df.style.applymap(color_spearman).format("{:.2f}"),
+            height=600,
+            use_container_width=True
+        )
+    
+    with tab3:
+        st.subheader("Matriks Signifikansi (p-value)")
+        p_df = pd.DataFrame(
+            p_matrix,
+            index=subkriteria_names,
+            columns=subkriteria_names
+        )
+        
+        def highlight_significant(val):
+            return "background-color: yellow; font-weight: bold" if val < 0.05 else ""
+        
+        st.dataframe(
+            p_df.style.applymap(highlight_significant).format("{:.4f}"),
+            height=600,
+            use_container_width=True
+        )
+    
+    # Rekomendasi Analisis
+    st.subheader("🔍 Insight Analisis")
+    generate_spearman_insights(corr_matrix, p_matrix, subkriteria_names)
+
+def generate_spearman_insights(corr_matrix, p_matrix, subkriteria_names):
+    """Generate automatic insights from Spearman analysis"""
+    strong_pos = []
+    strong_neg = []
+    moderate_pos = []
+    moderate_neg = []
+    
+    n = len(corr_matrix)
+    for i in range(n):
+        for j in range(i+1, n):
+            corr = corr_matrix[i,j]
+            p_val = p_matrix[i,j]
+            
+            if p_val < 0.05:  # Hanya yang signifikan
+                if corr >= 0.7:
+                    strong_pos.append((i, j, corr))
+                elif corr >= 0.3:
+                    moderate_pos.append((i, j, corr))
+                elif corr <= -0.7:
+                    strong_neg.append((i, j, corr))
+                elif corr <= -0.3:
+                    moderate_neg.append((i, j, corr))
+    
+    if strong_pos:
+        st.info("**Korelasi Positif Kuat (Perlu Perhatian Khusus):**")
+        for i, j, corr in strong_pos:
+            st.markdown(f"- `{subkriteria_names[i]}` ⇄ `{subkriteria_names[j]}`: {corr:.2f}")
+    
+    if moderate_pos:
+        st.info("**Korelasi Positif Sedang:**")
+        for i, j, corr in moderate_pos:
+            st.markdown(f"- `{subkriteria_names[i]}` ⇄ `{subkriteria_names[j]}`: {corr:.2f}")
+    
+    if strong_neg:
+        st.warning("**Korelasi Negatif Kuat (Perlu Investigasi):**")
+        for i, j, corr in strong_neg:
+            st.markdown(f"- `{subkriteria_names[i]}` ⇄ `{subkriteria_names[j]}`: {corr:.2f}")
+    
+    if moderate_neg:
+        st.warning("**Korelasi Negatif Sedang:**")
+        for i, j, corr in moderate_neg:
+            st.markdown(f"- `{subkriteria_names[i]}` ⇄ `{subkriteria_names[j]}`: {corr:.2f}")
+    
+    if not (strong_pos or moderate_pos or strong_neg or moderate_neg):
+        st.success("Tidak ditemukan korelasi yang signifikan antar kriteria penilaian")
 # Main Application
 def main():
     st.title("Sistem AHP untuk Penilaian Kenaikan Status Guru")
@@ -807,7 +990,8 @@ def main():
         "Manajemen Kriteria & Subkriteria",
         "Perbandingan Kriteria & Subkriteria",
         "Penilaian Guru",
-        "Hasil Perangkingan"
+        "Hasil Perangkingan",
+        "Analisis Korelasi Spearman"
     ])
     
     if menu == "Dashboard":
@@ -822,6 +1006,8 @@ def main():
         show_penilaian()
     elif menu == "Hasil Perangkingan":
         show_hasil_perangkingan()
+    elif menu == "Analisis Korelasi Spearman":
+        show_spearman_analysis()
 
 if __name__ == "__main__":
     main()
