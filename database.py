@@ -55,7 +55,7 @@ def create_connection():
             host="localhost",
             user="root",
             password="",
-            database="sistem_ahp_guru"
+            database="ahp_db"
         )
         return conn
     except mysql.connector.Error as err:
@@ -73,7 +73,20 @@ def init_database():
     # Buat tabel jika belum ada
     tables = [
         """
+        CREATE TABLE IF NOT EXISTS tahun_ajaran (
+            id_tahun_ajaran INT AUTO_INCREMENT PRIMARY KEY,
+            tahun VARCHAR(9) NOT NULL, -- Format: 2023/2024
+            periode VARCHAR(50) NOT NULL, -- Contoh: Tahun Ajaran 2023/2024
+            semester ENUM('Ganjil', 'Genap') NOT NULL,
+            is_aktif BOOLEAN DEFAULT FALSE,
+            tanggal_mulai DATE,
+            tanggal_selesai DATE
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS guru (
+            id_tahun_ajaran INT,
+            FOREIGN KEY (id_tahun_ajaran) REFERENCES tahun_ajaran(id_tahun_ajaran),
             id_guru INT AUTO_INCREMENT PRIMARY KEY,
             nama_guru VARCHAR(100) NOT NULL,
             nip VARCHAR(20) NOT NULL UNIQUE,
@@ -105,7 +118,7 @@ def init_database():
             nilai FLOAT NOT NULL,
             tanggal_penilaian DATE,
             FOREIGN KEY (id_guru) REFERENCES guru(id_guru),
-            FOREIGN KEY (id_subkriteria) REFERENCES subkriteria(id_subkriteria)
+            FOREIGN KEY (id_subkriteria) REFERENCES subkriteria(id_subkriteria) 
         )
         """,
         """
